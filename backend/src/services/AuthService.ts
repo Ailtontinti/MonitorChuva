@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { type SignOptions } from 'jsonwebtoken';
 
 import { env } from '../config/env';
 import { User } from '../models/User';
@@ -23,6 +23,10 @@ interface AuthResponse {
   user: Pick<User, 'id' | 'name' | 'email' | 'organizationId' | 'role'>;
 }
 
+const jwtSignOptions = (expiresIn: string): SignOptions => ({
+  expiresIn: expiresIn as SignOptions['expiresIn']
+});
+
 export class AuthService {
   constructor(
     private readonly userRepository = new UserRepository(),
@@ -44,13 +48,11 @@ export class AuthService {
 
     const token = jwt.sign(
       {
+        sub: user.id,
         organizationId: user.organizationId
       },
       env.JWT_SECRET,
-      {
-        subject: user.id,
-        expiresIn: env.JWT_EXPIRES_IN
-      }
+      jwtSignOptions(env.JWT_EXPIRES_IN)
     );
 
     return {
@@ -86,9 +88,9 @@ export class AuthService {
     });
 
     const token = jwt.sign(
-      { organizationId: user.organizationId },
+      { sub: user.id, organizationId: user.organizationId },
       env.JWT_SECRET,
-      { subject: user.id, expiresIn: env.JWT_EXPIRES_IN }
+      jwtSignOptions(env.JWT_EXPIRES_IN)
     );
 
     return {

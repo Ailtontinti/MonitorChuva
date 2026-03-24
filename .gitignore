@@ -1,0 +1,6 @@
+# Backend (build e dependências locais)
+backend/dist/
+backend/node_modules/
+
+# Raiz do monorepo agropluvi (se houver)
+node_modules/

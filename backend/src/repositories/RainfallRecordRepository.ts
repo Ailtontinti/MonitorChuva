@@ -100,7 +100,7 @@ export class RainfallRecordRepository {
       [data.id, data.rainGaugeId],
     );
 
-    return result.rowCount > 0;
+    return (result.rowCount ?? 0) > 0;
   }
 }
 
