@@ -1,0 +1,21 @@
+{
+  "name": "agropluvi-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Monorepo do sistema SaaS AgroPluvi (monitoramento inteligente de chuva para produtores rurais).",
+  "workspaces": [
+    "backend",
+    "mobile"
+  ],
+  "scripts": {
+    "backend:dev": "npm --workspace backend run dev",
+    "backend:build": "npm --workspace backend run build",
+    "backend:start": "npm --workspace backend run start",
+    "mobile:start": "npm --workspace mobile run start"
+  },
+  "overrides": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5"
+  }
+}
