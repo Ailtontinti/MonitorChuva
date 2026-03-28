@@ -45,6 +45,9 @@ export const agronomy = {
 
   chartBar: '#5a9c7a',
   chartBarMuted: '#a8d4b8',
+  /** Barras “água” no gráfico de chuva recente (visualização detalhada) */
+  chartBarSky: '#66a3ff',
+  chartGridLine: '#e4e2dc',
 
   menuRain: '#eef6f0',
   menuRainIcon: '#c8e6d4',

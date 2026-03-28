@@ -11,7 +11,8 @@
     "backend:dev": "npm --workspace backend run dev",
     "backend:build": "npm --workspace backend run build",
     "backend:start": "npm --workspace backend run start",
-    "mobile:start": "npm --workspace mobile run start"
+    "mobile:start": "expo start ./mobile",
+    "mobile:start:clear": "expo start ./mobile -c"
   },
   "overrides": {
     "react": "19.1.0",

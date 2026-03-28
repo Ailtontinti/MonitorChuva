@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BackHandler, StyleSheet, Text, View, Pressable } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -39,17 +39,13 @@ export function MapLocationPicker({
   onCancel,
 }: MapLocationPickerProps) {
   const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
-  const isFiniteRegion = (value: any): value is MapRegion =>
-    value &&
-    isFiniteNumber(value.latitude) &&
-    isFiniteNumber(value.longitude) &&
-    isFiniteNumber(value.latitudeDelta) &&
-    isFiniteNumber(value.longitudeDelta);
 
+  const mapRef = useRef<MapView | null>(null);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
 
-  const [region, setRegion] = useState<MapRegion>(() => {
+  /** Região inicial só na montagem; evita `region` controlado (quebra onPress em vários Android). */
+  const [initialMapRegion] = useState<MapRegion>(() => {
     if (initialLatitude != null && initialLongitude != null && Number.isFinite(initialLatitude) && Number.isFinite(initialLongitude)) {
       return {
         latitude: initialLatitude,
@@ -117,7 +113,7 @@ export function MapLocationPicker({
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         };
-        setRegion(nextRegion);
+        mapRef.current?.animateToRegion(nextRegion, 350);
         setSelectedLat(latitude);
         setSelectedLng(longitude);
       } catch {
@@ -169,15 +165,10 @@ export function MapLocationPicker({
       </View>
 
       <MapView
+        ref={mapRef}
         style={styles.map}
-        region={region}
+        initialRegion={initialMapRegion}
         provider={MapView.PROVIDER_OSM}
-        onRegionChangeComplete={(r) => {
-          // Evita crash caso a lib retorne alguma coordenada inválida.
-          if (isFiniteRegion(r)) {
-            setRegion(r);
-          }
-        }}
         onPress={handleMapPress}
       >
         {isFiniteNumber(selectedLat) && isFiniteNumber(selectedLng) && (

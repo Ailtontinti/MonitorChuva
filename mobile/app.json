@@ -4,9 +4,9 @@
     "slug": "agropluvi",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icone.png",
     "splash": {
-      "image": "./assets/icon.png",
+      "image": "./assets/icone.png",
       "resizeMode": "contain",
       "backgroundColor": "#f4f1ea"
     },
@@ -15,7 +15,7 @@
     ],
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icon.png",
+        "foregroundImage": "./assets/icone.png",
         "backgroundColor": "#f4f1ea"
       },
       "package": "com.ailtontinti.agropluvi",

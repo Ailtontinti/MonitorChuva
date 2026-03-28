@@ -50,6 +50,8 @@ import { clearSession, getToken, getUser, saveSession } from './src/services/sto
 import { getCurrentWeather, WeatherCurrent, WeatherLocationParams } from './src/services/weather';
 import { createUser, listUsers, updateUser, UserItem } from './src/services/users';
 import { WeatherForecastCard } from './src/components/WeatherForecastCard';
+import { RecentRainfall7DayChart } from './src/components/dashboard/RecentRainfall7DayChart';
+import { RecentRainfallScreen } from './src/screens/RecentRainfallScreen';
 import { RainRecordsScreen } from './src/screens/RainRecordsScreen';
 import type { MapRegion } from './src/types/mapsRegion';
 import { agronomy as A } from './src/theme/agronomy';
@@ -428,6 +430,7 @@ export default function App() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [rainSummary, setRainSummary] = useState<RainSummaryPoint[]>([]);
   const [weather, setWeather] = useState<WeatherCurrent | null>(null);
+  const [weatherPlaceLabel, setWeatherPlaceLabel] = useState('');
   const [mapRainGauges, setMapRainGauges] = useState<RainGaugeMapItem[]>([]);
   const [rainRecordsFilterDays, setRainRecordsFilterDays] = useState<7 | 30 | null>(null);
   const [rainRecordsDateFilterIso, setRainRecordsDateFilterIso] = useState<string | null>(
@@ -436,6 +439,7 @@ export default function App() {
   const [rainRecordEditId, setRainRecordEditId] = useState<string | null>(null);
   const [rainRecordSuccess, setRainRecordSuccess] = useState<string>('');
   const [showGaugePicker, setShowGaugePicker] = useState(false);
+  const [showTalhaoPropertyPicker, setShowTalhaoPropertyPicker] = useState(false);
   const [rainSummaryDays, setRainSummaryDays] = useState<7 | 30 | 90>(7);
   const [people, setPeople] = useState<UserItem[]>([]);
   const [newPersonName, setNewPersonName] = useState('');
@@ -677,9 +681,30 @@ export default function App() {
         ]);
         setRainSummary(summary);
         setWeather(w);
+        let place = '';
+        if (loc) {
+          try {
+            const geo = await Location.reverseGeocodeAsync({
+              latitude: loc.latitude,
+              longitude: loc.longitude,
+            });
+            const r = geo[0];
+            if (r) {
+              const city = r.city || r.district || r.subregion || r.name;
+              const region = r.region;
+              if (city && region) place = `${city}, ${region}`;
+              else if (city) place = city;
+              else if (region) place = region;
+            }
+          } catch {
+            /* sem rótulo */
+          }
+        }
+        setWeatherPlaceLabel(place);
       } catch {
         setRainSummary([]);
         setWeather(null);
+        setWeatherPlaceLabel('');
       }
     };
     fetchDashboard();
@@ -1070,6 +1095,7 @@ export default function App() {
       setSelectedTalhaoPropertyId(null);
       setNewTalhaoLat(null);
       setNewTalhaoLng(null);
+      setShowTalhaoPropertyPicker(false);
       setTela('talhoes');
     } catch (err: unknown) {
       const msg =
@@ -1661,34 +1687,6 @@ export default function App() {
           contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
           showsVerticalScrollIndicator={false}
         >
-          <Pressable
-            onPress={() => setTela('talhoes')}
-            style={{
-              backgroundColor: A.bgCard,
-              borderRadius: 18,
-              padding: 16,
-              marginBottom: 16,
-              borderWidth: 1,
-              borderColor: A.border,
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-            }}
-          >
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={{ fontSize: 22, marginRight: 10 }}>🌧️</Text>
-              <View>
-                <Text style={{ color: A.textPrimary, fontSize: 17, fontWeight: '700' }}>
-                  Talhões e pluviômetros
-                </Text>
-                <Text style={{ color: A.textSecondary, fontSize: 13, marginTop: 2 }}>
-                  Selecionar propriedade e sensor
-                </Text>
-              </View>
-            </View>
-            <Text style={{ color: A.primary, fontSize: 18, fontWeight: '700' }}>→</Text>
-          </Pressable>
-
           {/* Card Chuvas recentes */}
           <View
             style={{
@@ -1738,50 +1736,15 @@ export default function App() {
                   totalMm: byDate[dateStr] ?? 0,
                 });
               }
-              const maxMm = Math.max(1, ...days.map((x) => x.totalMm));
-              return (
-                <View style={{ height: 180, justifyContent: 'flex-end' }}>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      alignItems: 'flex-end',
-                      justifyContent: 'space-between',
-                      paddingHorizontal: 8,
-                    }}
-                  >
-                    {days.map((d) => (
-                      <View key={d.date} style={{ alignItems: 'center', flex: 1 }}>
-                        <View
-                          style={{
-                            width: 18,
-                            height: Math.max(6, (d.totalMm / maxMm) * 110),
-                            borderRadius: 6,
-                            backgroundColor: A.chartBar,
-                          }}
-                        />
-                      </View>
-                    ))}
-                  </View>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      marginTop: 10,
-                      paddingHorizontal: 8,
-                    }}
-                  >
-                    {days.map((d) => (
-                      <Text key={d.date} style={{ fontSize: 12, color: A.textMuted }}>
-                        {d.label}
-                      </Text>
-                    ))}
-                  </View>
-                </View>
-              );
+              return <RecentRainfall7DayChart days={days} />;
             })()}
           </View>
 
-          <WeatherForecastCard variant="full" weather={weather} />
+          <WeatherForecastCard
+            variant="full"
+            weather={weather}
+            locationLabel={weatherPlaceLabel || undefined}
+          />
         </ScrollView>
       </View>
     );
@@ -1789,246 +1752,28 @@ export default function App() {
 
   if (tela === 'detalhesChuvas') {
     return (
-      <View style={[styles.tela, { backgroundColor: A.bgCanvas }]}>
-        <View
-          style={{
-            backgroundColor: A.bgCard,
-            paddingTop: 44,
-            paddingBottom: 16,
-            paddingHorizontal: 16,
-            flexDirection: 'row',
-            alignItems: 'center',
-            borderBottomWidth: 1,
-            borderBottomColor: A.border,
-          }}
-        >
-          <Pressable onPress={() => setTela('visualizarDados')} style={{ padding: 8, marginRight: 8 }}>
-            <Text style={{ fontSize: 18, color: A.textPrimary }}>←</Text>
-          </Pressable>
-          <Text style={{ fontSize: A.fontTitleScreen, fontWeight: '600', color: A.textPrimary }}>
-            Chuvas Recentes
-          </Text>
-        </View>
-
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
-          showsVerticalScrollIndicator={false}
-        >
-          <View
-            style={{
-              backgroundColor: A.bgCard,
-              borderRadius: 20,
-              padding: 16,
-              shadowColor: A.shadow,
-              shadowOpacity: 0.06,
-              shadowOffset: { width: 0, height: 3 },
-              shadowRadius: 10,
-              elevation: 2,
-            }}
-          >
-            <Text style={{ fontSize: 18, fontWeight: '700', color: A.textPrimary, marginBottom: 4 }}>
-              📊 Expandir Gráfico
-            </Text>
-            <Text style={{ fontSize: 15, color: A.textSecondary, marginBottom: 12 }}>
-              Explore o histórico de chuva com mais detalhes.
-            </Text>
-
-            {/* Filtros rápidos de período */}
-            <View
-              style={{
-                flexDirection: 'row',
-                marginBottom: 16,
-                backgroundColor: A.pillInactive,
-                borderRadius: 999,
-                padding: 4,
-              }}
-            >
-              {[7, 30, 90].map((d) => {
-                const active = rainSummaryDays === d;
-                return (
-                  <Pressable
-                    key={d}
-                    onPress={() => setRainSummaryDays(d as 7 | 30 | 90)}
-                    style={{
-                      flex: 1,
-                      paddingVertical: 6,
-                      borderRadius: 999,
-                      backgroundColor: active ? A.primary : 'transparent',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 14,
-                        color: active ? A.textOnDark : A.textSecondary,
-                        fontWeight: active ? '600' : '400',
-                      }}
-                    >
-                      {d} dias
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            {/* Gráfico usando rainSummary e período selecionado */}
-            {(() => {
-              const daysWindow = rainSummaryDays;
-              const days: { date: string; label: string; totalMm: number }[] = [];
-              const today = new Date();
-              const byDate: Record<string, number> = {};
-              rainSummary.forEach((s) => {
-                byDate[s.date] = Number(s.totalMm);
-              });
-              for (let i = daysWindow - 1; i >= 0; i--) {
-                const d = new Date(today);
-                d.setDate(d.getDate() - i);
-                const dateStr = d.toISOString().slice(0, 10);
-                const day = String(d.getDate()).padStart(2, '0');
-                const month = String(d.getMonth() + 1).padStart(2, '0');
-                days.push({
-                  date: dateStr,
-                  label: `${day}/${month}`,
-                  totalMm: byDate[dateStr] ?? 0,
-                });
-              }
-              const maxMm = Math.max(1, ...days.map((x) => x.totalMm));
-              return (
-                <View style={{ height: 220, justifyContent: 'flex-end', marginBottom: 12 }}>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      alignItems: 'flex-end',
-                      justifyContent: 'space-between',
-                      paddingHorizontal: 4,
-                    }}
-                  >
-                    {days.map((d) => (
-                      <View key={d.date} style={{ alignItems: 'center', flex: 1 }}>
-                        <View
-                          style={{
-                            width: 10,
-                            height: Math.max(4, (d.totalMm / maxMm) * 140),
-                            borderRadius: 4,
-                            backgroundColor: A.chartBar,
-                          }}
-                        />
-                      </View>
-                    ))}
-                  </View>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      marginTop: 8,
-                      paddingHorizontal: 4,
-                    }}
-                  >
-                    {days.map((d) => (
-                      <Text key={d.date} style={{ fontSize: 12, color: A.textMuted }}>
-                        {d.label}
-                      </Text>
-                    ))}
-                  </View>
-                  <Text
-                    style={{
-                      fontSize: 13,
-                      color: A.textMuted,
-                      marginTop: 4,
-                    }}
-                  >
-                    mm de chuva por dia no período selecionado
-                  </Text>
-                </View>
-              );
-            })()}
-
-            <View style={{ marginTop: 4 }}>
-              <Text style={{ fontSize: 16, fontWeight: '700', color: A.textPrimary, marginBottom: 8 }}>
-                Esta funcionalidade permitirá:
-              </Text>
-              <Text style={{ fontSize: 16, color: A.textSecondary, marginBottom: 4 }}>
-                • Visualizar período personalizado
-              </Text>
-              <Text style={{ fontSize: 16, color: A.textSecondary, marginBottom: 4 }}>
-                • Filtrar por pluviômetro
-              </Text>
-              <Text style={{ fontSize: 16, color: A.textSecondary, marginBottom: 4 }}>
-                • Exportar dados
-              </Text>
-              <Text style={{ fontSize: 16, color: A.textSecondary, marginBottom: 4 }}>
-                • Comparar propriedades
-              </Text>
-              <Text style={{ fontSize: 16, color: A.textSecondary }}>
-                • Análise detalhada
-              </Text>
-            </View>
-
-            {/* Ações rápidas ligadas às telas existentes */}
-            <View style={{ marginTop: 16 }}>
-              <Pressable
-                onPress={() => setTela('rainMap')}
-                style={{
-                  paddingVertical: 10,
-                  paddingHorizontal: 12,
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: A.border,
-                  marginBottom: 8,
-                }}
-              >
-                <Text style={{ fontSize: 15, color: A.textPrimary }}>
-                  Ver mapa de chuva e comparar propriedades
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  // Forca novo fluxo de selecao para evitar estado inconsistente.
-                  setSelectedProperty(null);
-                  setSelectedGauge(null);
-                  setError('');
-                  setTela('talhoes');
-                }}
-                style={{
-                  paddingVertical: 10,
-                  paddingHorizontal: 12,
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: A.border,
-                  marginBottom: 8,
-                }}
-              >
-                <Text style={{ fontSize: 15, color: A.textPrimary }}>
-                  Filtrar por talhão / pluviômetro
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  if (selectedProperty && selectedGauge) {
-                    handleExportRainRecords();
-                    return;
-                  }
-                  setExportCsvAfterSelection(true);
-                  setError('Selecione um talhão e um pluviômetro antes de exportar o CSV.');
-                  setTela('talhoes');
-                }}
-                style={{
-                  paddingVertical: 10,
-                  paddingHorizontal: 12,
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: A.border,
-                }}
-              >
-                <Text style={{ fontSize: 15, color: A.textPrimary }}>
-                  Exportar dados detalhados (CSV)
-                </Text>
-              </Pressable>
-            </View>
-          </View>
-        </ScrollView>
-      </View>
+      <RecentRainfallScreen
+        onBack={() => setTela('visualizarDados')}
+        rainSummary={rainSummary}
+        rainSummaryDays={rainSummaryDays}
+        onRainSummaryDaysChange={setRainSummaryDays}
+        onCompareAreas={() => setTela('rainMap')}
+        onFilterPluviometer={() => {
+          setSelectedProperty(null);
+          setSelectedGauge(null);
+          setError('');
+          setTela('talhoes');
+        }}
+        onExportCsv={() => {
+          if (selectedProperty && selectedGauge) {
+            handleExportRainRecords();
+            return;
+          }
+          setExportCsvAfterSelection(true);
+          setError('Selecione um talhão e um pluviômetro antes de exportar o CSV.');
+          setTela('talhoes');
+        }}
+      />
     );
   }
 
@@ -2396,7 +2141,13 @@ export default function App() {
             borderBottomColor: A.border,
           }}
         >
-          <Pressable onPress={() => setTela('inserirDados')} style={{ padding: 8, marginRight: 8 }}>
+          <Pressable
+            onPress={() => {
+              setShowTalhaoPropertyPicker(false);
+              setTela('inserirDados');
+            }}
+            style={{ padding: 8, marginRight: 8 }}
+          >
             <Text style={{ fontSize: 18, color: A.textPrimary }}>←</Text>
           </Pressable>
           <Text style={{ fontSize: A.fontTitleScreen, fontWeight: '600', color: A.textPrimary }}>
@@ -2408,6 +2159,8 @@ export default function App() {
           style={{ flex: 1 }}
           contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          removeClippedSubviews={false}
         >
           <View
             style={{
@@ -2424,48 +2177,87 @@ export default function App() {
             <Text style={{ color: A.textPrimary, fontSize: 16, fontWeight: '700', marginBottom: 6 }}>
               Propriedade
             </Text>
-            <View
-              style={{
-                borderWidth: 1,
-                borderColor: A.inputBorder,
-                borderRadius: 12,
-                padding: 10,
-                backgroundColor: A.inputBg,
-              }}
-            >
-              {properties.length === 0 ? (
-                <Text style={{ color: A.textSecondary, fontSize: 14 }}>
-                  Nenhuma propriedade cadastrada. Cadastre uma propriedade primeiro.
-                </Text>
-              ) : (
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                  {properties.map((p) => {
-                    const active = selectedTalhaoPropertyId === p.id;
-                    return (
-                      <Pressable
-                        key={`talhao-parent-${p.id}`}
-                        onPress={() => {
-                          setSelectedTalhaoPropertyId(p.id);
-                          setError('');
-                        }}
-                        style={{
-                          borderRadius: 999,
-                          paddingVertical: 8,
-                          paddingHorizontal: 12,
-                          borderWidth: 1,
-                          borderColor: active ? A.primary : A.inputBorder,
-                          backgroundColor: active ? A.primary : A.bgCard,
-                        }}
-                      >
-                        <Text style={{ color: active ? A.textOnDark : A.textPrimary, fontSize: 13 }}>
-                          {p.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              )}
-            </View>
+            {properties.length === 0 ? (
+              <Text
+                style={{
+                  backgroundColor: A.inputBg,
+                  borderWidth: 1,
+                  borderColor: A.inputBorder,
+                  borderRadius: 8,
+                  paddingVertical: 14,
+                  paddingHorizontal: 16,
+                  color: A.textSecondary,
+                  fontSize: 15,
+                }}
+              >
+                Nenhuma propriedade cadastrada. Cadastre uma propriedade primeiro.
+              </Text>
+            ) : (
+              <>
+                <Pressable
+                  onPress={() => setShowTalhaoPropertyPicker((prev) => !prev)}
+                  style={{
+                    backgroundColor: A.inputBg,
+                    borderWidth: 1,
+                    borderColor: A.inputBorder,
+                    borderRadius: 8,
+                    paddingVertical: 14,
+                    paddingHorizontal: 16,
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: selectedTalhaoPropertyId ? A.textPrimary : '#9ca3af',
+                      fontSize: 18,
+                      flex: 1,
+                    }}
+                    numberOfLines={2}
+                  >
+                    {selectedTalhaoPropertyId
+                      ? properties.find((p) => p.id === selectedTalhaoPropertyId)?.name ??
+                        'Selecione uma propriedade'
+                      : 'Selecione uma propriedade'}
+                  </Text>
+                  <Text style={{ color: '#9ca3af' }}>▾</Text>
+                </Pressable>
+                {showTalhaoPropertyPicker && (
+                  <View
+                    style={{
+                      marginTop: 8,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: A.inputBorder,
+                      backgroundColor: A.bgCard,
+                      maxHeight: 220,
+                    }}
+                  >
+                    <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                      {properties.map((p) => (
+                        <Pressable
+                          key={`talhao-parent-${p.id}`}
+                          onPress={() => {
+                            setSelectedTalhaoPropertyId(p.id);
+                            setShowTalhaoPropertyPicker(false);
+                            setError('');
+                          }}
+                          style={{
+                            paddingVertical: 10,
+                            paddingHorizontal: 12,
+                            borderBottomWidth: 1,
+                            borderBottomColor: A.bgCanvas,
+                          }}
+                        >
+                          <Text style={{ color: A.textPrimary, fontSize: 17 }}>{p.name}</Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+              </>
+            )}
 
             <Text style={{ color: A.textPrimary, fontSize: 16, fontWeight: '700', marginBottom: 6 }}>
               Nome do Talhão
@@ -2511,7 +2303,7 @@ export default function App() {
               disabled={loading || !newTalhaoName.trim() || !selectedTalhaoPropertyId}
             >
               <Text style={styles.botaoTexto}>
-                {loading ? 'Salvando...' : 'Salvar Talhão'}
+                {loading ? 'Salvando...' : 'Salvar'}
               </Text>
             </Pressable>
 
@@ -2618,7 +2410,10 @@ export default function App() {
 
           {/* Talhão */}
           <Pressable
-            onPress={() => setTela('cadastrarTalhao')}
+            onPress={() => {
+              setShowTalhaoPropertyPicker(false);
+              setTela('cadastrarTalhao');
+            }}
             style={{
               backgroundColor: A.menuField,
               borderRadius: 18,
