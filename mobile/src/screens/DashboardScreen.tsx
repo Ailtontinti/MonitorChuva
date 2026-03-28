@@ -1,7 +1,13 @@
-import React from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, View } from 'react-native';
+import { SafeAreaView as ContextSafeAreaView } from 'react-native-safe-area-context';
 
-import { WeatherForecastCard } from '../components/WeatherForecastCard';
+import { DashboardActionButtons } from '../components/dashboard/DashboardActionButtons';
+import { DashboardHeader } from '../components/dashboard/DashboardHeader';
+import { PropertyManageCard } from '../components/dashboard/PropertyManageCard';
+import { RainSummaryChartCard } from '../components/dashboard/RainSummaryChartCard';
+import { TodayRainHighlight } from '../components/dashboard/TodayRainHighlight';
+import { WeatherNowCard } from '../components/dashboard/WeatherNowCard';
 import { RainSummaryPoint } from '../services/dashboard';
 import { WeatherCurrent } from '../services/weather';
 import { agronomy as A } from '../theme/agronomy';
@@ -23,6 +29,50 @@ interface Props {
   onGoInserirDados: () => void;
 }
 
+function toLocalYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function normalizeDayKey(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return toLocalYmd(date);
+}
+
+function findMmForDay(points: RainSummaryPoint[], dayKey: string): number | null {
+  const hit = points.find((p) => normalizeDayKey(p.date) === dayKey);
+  return hit ? hit.totalMm : null;
+}
+
+function buildVsFromWeather(weather: WeatherCurrent | null): string | null {
+  if (!weather || typeof weather.rainTodayMm !== 'number' || weather.rainYesterdayMm == null) return null;
+  const diff = weather.rainTodayMm - weather.rainYesterdayMm;
+  if (Math.abs(diff) < 0.05) return 'Igual a ontem';
+  if (diff > 0) return `+${diff.toFixed(1)} mm vs ontem`;
+  return `${diff.toFixed(1)} mm vs ontem`;
+}
+
+function buildVsPreviousDay(rainSummary: RainSummaryPoint[]): string | null {
+  const now = new Date();
+  const todayKey = toLocalYmd(now);
+  const y = new Date(now);
+  y.setDate(y.getDate() - 1);
+  const yesterdayKey = toLocalYmd(y);
+
+  const mmToday = findMmForDay(rainSummary, todayKey);
+  const mmYest = findMmForDay(rainSummary, yesterdayKey);
+  if (mmToday === null && mmYest === null) return null;
+  const t = mmToday ?? 0;
+  if (mmYest === null) return null;
+  const diff = t - mmYest;
+  if (Math.abs(diff) < 0.05) return 'Igual a ontem';
+  if (diff > 0) return `+${diff.toFixed(1)} mm vs ontem`;
+  return `${diff.toFixed(1)} mm vs ontem`;
+}
+
 export function DashboardScreen({
   user,
   rainSummaryDays,
@@ -33,8 +83,16 @@ export function DashboardScreen({
   onGoVisualizarDados,
   onGoInserirDados,
 }: Props) {
-  const showRainBars = rainSummaryDays === 7 || rainSummaryDays === 30;
-  const maxRainValue = rainSummary.reduce((max, point) => Math.max(max, point.totalMm), 0);
+  const [lastUpdated, setLastUpdated] = useState(() => new Date());
+
+  useEffect(() => {
+    setLastUpdated(new Date());
+  }, [rainSummary, weather, rainSummaryDays]);
+
+  const userFirstName = useMemo(() => {
+    if (!user?.name?.trim()) return null;
+    return user.name.trim().split(/\s+/)[0] ?? null;
+  }, [user?.name]);
 
   const formatRainDateLabel = (dateIso: string) => {
     const date = new Date(dateIso);
@@ -42,196 +100,99 @@ export function DashboardScreen({
     return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
   };
 
-  return (
-    <View style={{ flex: 1, backgroundColor: A.bgCanvas }}>
-      <View
-        style={{
-          paddingTop: 48,
-          paddingBottom: 20,
-          paddingHorizontal: 24,
-          backgroundColor: A.bgHeader,
-        }}
-      >
-        <Text style={{ color: A.textOnDark, fontSize: 22, fontWeight: '700' }}>AgroPluvi</Text>
-        <Text style={{ color: A.textOnDarkMuted, fontSize: 14, marginTop: 2 }}>
-          {user ? 'Proprietário da Plataforma' : 'Bem-vindo à plataforma'}
-        </Text>
+  const now = new Date();
+  const todayKey = toLocalYmd(now);
+  const mmToday = findMmForDay(rainSummary, todayKey);
+  const mmTodayDisplay =
+    weather != null && typeof weather.rainTodayMm === 'number' ? weather.rainTodayMm : mmToday ?? 0;
+
+  const vsPreviousDay = (() => {
+    const w = buildVsFromWeather(weather);
+    if (w != null) return w;
+    if (weather?.rainFromGps) return null;
+    return buildVsPreviousDay(rainSummary);
+  })();
+
+  const canUseContextSafeArea = typeof ContextSafeAreaView === 'function';
+
+  if (!canUseContextSafeArea) {
+    return (
+      <View style={styles.root}>
+        <DashboardHeader userFirstName={userFirstName} lastUpdated={lastUpdated} />
+
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          <TodayRainHighlight
+            mmToday={mmTodayDisplay}
+            vsPreviousDay={vsPreviousDay}
+            locationHint={weather?.rainFromGps ? 'Com base na sua localização (GPS)' : undefined}
+          />
+
+          <PropertyManageCard onPress={onGoTalhoes} />
+
+          <RainSummaryChartCard
+            rainSummaryDays={rainSummaryDays}
+            setRainSummaryDays={setRainSummaryDays}
+            rainSummary={rainSummary}
+            formatRainDateLabel={formatRainDateLabel}
+          />
+
+          <WeatherNowCard weather={weather} onPress={onGoVisualizarDados} />
+
+          <DashboardActionButtons onInserirDados={onGoInserirDados} onVisualizarDados={onGoVisualizarDados} />
+        </ScrollView>
       </View>
+    );
+  }
+
+  return (
+    <ContextSafeAreaView style={styles.root} edges={['bottom']}>
+      <DashboardHeader userFirstName={userFirstName} lastUpdated={lastUpdated} />
 
       <ScrollView
-        style={{ flex: 1 }}
-        contentContainerStyle={{ padding: 20, paddingBottom: 32 }}
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <View
-          style={{
-            backgroundColor: A.bgCard,
-            borderRadius: 24,
-            paddingVertical: 24,
-            paddingHorizontal: 20,
-            marginBottom: 20,
-            shadowColor: '#000',
-            shadowOpacity: 0.06,
-            shadowOffset: { width: 0, height: 4 },
-            shadowRadius: 10,
-            elevation: 3,
-          }}
-        >
-          <Text style={{ color: A.textPrimary, fontSize: 20, fontWeight: '700', marginBottom: 4 }}>
-            Bem-vindo!
-          </Text>
-          <Text style={{ color: A.textSecondary, fontSize: 14 }}>
-            {user ? `Olá, ${user.name}!` : 'Faça login para começar.'}
-          </Text>
-        </View>
-
-        <Pressable
-          onPress={onGoTalhoes}
-          style={{
-            backgroundColor: A.accentFeature,
-            borderRadius: 24,
-            paddingVertical: 22,
-            paddingHorizontal: 20,
-            marginBottom: 16,
-            flexDirection: 'row',
-            alignItems: 'center',
-          }}
-        >
-          <View
-            style={{
-              width: 52,
-              height: 52,
-              borderRadius: 26,
-              backgroundColor: A.accentFeatureIcon,
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginRight: 16,
-            }}
-          >
-            <Text style={{ fontSize: 24 }}>🏢</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ color: A.textOnDark, fontSize: 18, fontWeight: '700' }}>Gerenciar Propriedades</Text>
-            <Text style={{ color: A.textOnDarkMuted, fontSize: 13, marginTop: 4 }}>
-              Cadastrar e administrar propriedades da fazenda
-            </Text>
-          </View>
-        </Pressable>
-
-        <View
-          style={{
-            backgroundColor: A.bgCard,
-            borderRadius: 24,
-            paddingVertical: 18,
-            paddingHorizontal: 16,
-            marginBottom: 16,
-          }}
-        >
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text style={{ color: A.textPrimary, fontSize: 16, fontWeight: '700' }}>Resumo de chuva</Text>
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              {[7, 30, 90].map((d) => (
-                <Pressable
-                  key={`rs-${d}`}
-                  onPress={() => setRainSummaryDays(d as 7 | 30 | 90)}
-                  style={{
-                    paddingVertical: 6,
-                    paddingHorizontal: 10,
-                    borderRadius: 999,
-                    backgroundColor: rainSummaryDays === d ? A.primary : A.pillInactive,
-                  }}
-                >
-                  <Text style={{ color: rainSummaryDays === d ? A.textOnDark : A.textPrimary, fontSize: 12 }}>
-                    {d}d
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          </View>
-          <View style={{ marginTop: 10 }}>
-            {rainSummary.length === 0 ? (
-              <Text style={{ color: A.textSecondary, fontSize: 13 }}>Sem dados no período.</Text>
-            ) : showRainBars ? (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 8 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'flex-end', minHeight: 170 }}>
-                  {rainSummary.map((p) => {
-                    const ratio = maxRainValue > 0 ? p.totalMm / maxRainValue : 0;
-                    const barHeight = Math.max(8, Math.round(ratio * 108));
-                    return (
-                      <View key={p.date} style={{ width: 34, alignItems: 'center', marginRight: 8 }}>
-                        <Text style={{ color: A.textPrimary, fontSize: 10, fontWeight: '600', marginBottom: 4 }}>
-                          {p.totalMm} mm
-                        </Text>
-                        <View
-                          style={{
-                            width: 20,
-                            height: barHeight,
-                            borderTopLeftRadius: 6,
-                            borderTopRightRadius: 6,
-                            backgroundColor: A.chartBar,
-                          }}
-                        />
-                        <Text style={{ color: A.textSecondary, fontSize: 10, marginTop: 6 }}>
-                          {formatRainDateLabel(p.date)}
-                        </Text>
-                      </View>
-                    );
-                  })}
-                </View>
-              </ScrollView>
-            ) : (
-              rainSummary.map((p) => (
-                <View
-                  key={p.date}
-                  style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}
-                >
-                  <Text style={{ color: A.textSecondary, fontSize: 13 }}>
-                    {new Date(p.date).toLocaleDateString()}
-                  </Text>
-                  <Text style={{ color: A.textPrimary, fontWeight: '600' }}>{p.totalMm} mm</Text>
-                </View>
-              ))
-            )}
-          </View>
-        </View>
-
-        <WeatherForecastCard
-          variant="teaser"
-          weather={weather}
-          onTeaserPress={onGoVisualizarDados}
+        <TodayRainHighlight
+          mmToday={mmTodayDisplay}
+          vsPreviousDay={vsPreviousDay}
+          locationHint={weather?.rainFromGps ? 'Com base na sua localização (GPS)' : undefined}
         />
 
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <Pressable
-            style={{
-              marginTop: 16,
-              paddingVertical: 12,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: A.primary,
-              alignItems: 'center',
-              flex: 1,
-            }}
-            onPress={onGoVisualizarDados}
-          >
-            <Text style={{ color: A.primary, fontSize: 16, fontWeight: '600' }}>Visualizar dados</Text>
-          </Pressable>
-          <Pressable
-            style={{
-              marginTop: 16,
-              paddingVertical: 12,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: A.primary,
-              alignItems: 'center',
-              flex: 1,
-            }}
-            onPress={onGoInserirDados}
-          >
-            <Text style={{ color: A.primary, fontSize: 16, fontWeight: '600' }}>Inserir dados</Text>
-          </Pressable>
-        </View>
+        <PropertyManageCard onPress={onGoTalhoes} />
+
+        <RainSummaryChartCard
+          rainSummaryDays={rainSummaryDays}
+          setRainSummaryDays={setRainSummaryDays}
+          rainSummary={rainSummary}
+          formatRainDateLabel={formatRainDateLabel}
+        />
+
+        <WeatherNowCard weather={weather} onPress={onGoVisualizarDados} />
+
+        <DashboardActionButtons onInserirDados={onGoInserirDados} onVisualizarDados={onGoVisualizarDados} />
       </ScrollView>
-    </View>
+    </ContextSafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: A.bgHeader,
+  },
+  scroll: {
+    flex: 1,
+    backgroundColor: A.bgCanvas,
+  },
+  scrollContent: {
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 28,
+    backgroundColor: A.bgCanvas,
+  },
+});

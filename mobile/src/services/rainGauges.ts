@@ -29,6 +29,16 @@ export interface CreateRainGaugeInput {
   longitude?: number | null;
 }
 
+export interface UpdateRainGaugeInput {
+  name?: string;
+  serialNumber?: string | null;
+  model?: string | null;
+  installationDate?: string | null;
+  status?: RainGaugeStatus;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
 export async function listRainGauges(
   organizationId: string,
   propertyId: string
@@ -73,4 +83,48 @@ export async function createRainGauge(
     }
   );
   return data;
+}
+
+export async function updateRainGauge(
+  organizationId: string,
+  propertyId: string,
+  id: string,
+  input: UpdateRainGaugeInput
+): Promise<RainGauge> {
+  const token = await getToken();
+  const { data } = await axios.put<RainGauge>(
+    `${API_BASE_URL}/api/properties/${propertyId}/rain-gauges/${id}`,
+    {
+      name: input.name?.trim(),
+      serialNumber: input.serialNumber ?? null,
+      model: input.model ?? null,
+      installationDate: input.installationDate ?? null,
+      status: input.status,
+      latitude: input.latitude ?? null,
+      longitude: input.longitude ?? null,
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Organization-Id': organizationId,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    }
+  );
+  return data;
+}
+
+export async function deleteRainGauge(
+  organizationId: string,
+  propertyId: string,
+  id: string
+): Promise<void> {
+  const token = await getToken();
+  await axios.delete(`${API_BASE_URL}/api/properties/${propertyId}/rain-gauges/${id}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Organization-Id': organizationId,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { BackHandler, StyleSheet, Text, View, Pressable } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
 
 import type { MapRegion } from '../types/mapsRegion';
 
@@ -37,6 +38,17 @@ export function MapLocationPicker({
   onSelect,
   onCancel,
 }: MapLocationPickerProps) {
+  const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+  const isFiniteRegion = (value: any): value is MapRegion =>
+    value &&
+    isFiniteNumber(value.latitude) &&
+    isFiniteNumber(value.longitude) &&
+    isFiniteNumber(value.latitudeDelta) &&
+    isFiniteNumber(value.longitudeDelta);
+
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
   const [region, setRegion] = useState<MapRegion>(() => {
     if (initialLatitude != null && initialLongitude != null && Number.isFinite(initialLatitude) && Number.isFinite(initialLongitude)) {
       return {
@@ -64,14 +76,76 @@ export function MapLocationPicker({
     return () => subscription.remove();
   }, [onCancel]);
 
-  const handleMapPress = (event: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
-    const { latitude, longitude } = event.nativeEvent.coordinate;
+  useEffect(() => {
+    const hasInitialCoords =
+      initialLatitude != null &&
+      initialLongitude != null &&
+      isFiniteNumber(initialLatitude) &&
+      isFiniteNumber(initialLongitude);
+
+    // Se a tela já veio com coordenadas (ex: edição), não sobrescreve com GPS.
+    if (hasInitialCoords) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        setGpsError(null);
+        setGpsLoading(true);
+
+        const permission = await Location.requestForegroundPermissionsAsync();
+        if (!permission.granted) {
+          if (!cancelled) setGpsError('Permissão de localização negada.');
+          return;
+        }
+
+        const pos = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+
+        const latitude = pos?.coords?.latitude;
+        const longitude = pos?.coords?.longitude;
+
+        if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude)) {
+          if (!cancelled) setGpsError('Não foi possível obter GPS válido.');
+          return;
+        }
+
+        if (cancelled) return;
+        const nextRegion: MapRegion = {
+          latitude,
+          longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        };
+        setRegion(nextRegion);
+        setSelectedLat(latitude);
+        setSelectedLng(longitude);
+      } catch {
+        if (!cancelled) setGpsError('Falha ao obter localização do GPS.');
+      } finally {
+        if (!cancelled) setGpsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialLatitude, initialLongitude]);
+
+  const handleMapPress = (event: any) => {
+    const coordinate = event?.nativeEvent?.coordinate;
+    const latitude = coordinate?.latitude;
+    const longitude = coordinate?.longitude;
+
+    if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude)) return;
+
     setSelectedLat(latitude);
     setSelectedLng(longitude);
   };
 
   const handleConfirm = () => {
-    if (selectedLat != null && selectedLng != null && Number.isFinite(selectedLat) && Number.isFinite(selectedLng)) {
+    if (isFiniteNumber(selectedLat) && isFiniteNumber(selectedLng)) {
       onSelect(selectedLat, selectedLng);
     }
   };
@@ -97,10 +171,16 @@ export function MapLocationPicker({
       <MapView
         style={styles.map}
         region={region}
-        onRegionChangeComplete={setRegion}
+        provider={MapView.PROVIDER_OSM}
+        onRegionChangeComplete={(r) => {
+          // Evita crash caso a lib retorne alguma coordenada inválida.
+          if (isFiniteRegion(r)) {
+            setRegion(r);
+          }
+        }}
         onPress={handleMapPress}
       >
-        {selectedLat != null && selectedLng != null && (
+        {isFiniteNumber(selectedLat) && isFiniteNumber(selectedLng) && (
           <Marker
             coordinate={{ latitude: selectedLat, longitude: selectedLng }}
             title="Local selecionado"
@@ -108,11 +188,22 @@ export function MapLocationPicker({
         )}
       </MapView>
 
-      {selectedLat != null && selectedLng != null && (
+      {isFiniteNumber(selectedLat) && isFiniteNumber(selectedLng) && (
         <View style={styles.footer}>
           <Text style={styles.coordsText}>
             {selectedLat.toFixed(6)}, {selectedLng.toFixed(6)}
           </Text>
+        </View>
+      )}
+
+      {gpsLoading && (
+        <View style={styles.gpsOverlay}>
+          <Text style={styles.gpsOverlayText}>Obtendo localização do GPS...</Text>
+        </View>
+      )}
+      {gpsError && (
+        <View style={styles.gpsErrorOverlay}>
+          <Text style={styles.gpsErrorText}>{gpsError}</Text>
         </View>
       )}
     </View>
@@ -168,6 +259,40 @@ const styles = StyleSheet.create({
   coordsText: {
     color: '#94a3b8',
     fontSize: 12,
+    textAlign: 'center',
+  },
+  gpsOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 64,
+    alignItems: 'center',
+    paddingHorizontal: 16,
+  },
+  gpsOverlayText: {
+    color: '#e5e7eb',
+    backgroundColor: 'rgba(2, 6, 23, 0.7)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  gpsErrorOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 64,
+    alignItems: 'center',
+    paddingHorizontal: 16,
+  },
+  gpsErrorText: {
+    color: '#fecaca',
+    backgroundColor: 'rgba(127, 29, 29, 0.18)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    fontSize: 13,
     textAlign: 'center',
   },
 });

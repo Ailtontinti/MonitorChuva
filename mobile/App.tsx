@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -9,9 +10,12 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Polygon } from 'react-native-maps';
+import * as DocumentPicker from 'expo-document-picker';
 import { File, Paths } from 'expo-file-system';
+import * as FileSystemLegacy from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import * as Location from 'expo-location';
 
 import { LoginScreen } from './src/screens/LoginScreen';
 import { DashboardScreen } from './src/screens/DashboardScreen';
@@ -19,12 +23,14 @@ import { RainGaugesScreen } from './src/screens/RainGaugesScreen';
 import { RegisterScreen } from './src/screens/RegisterScreen';
 import { TalhoesScreen } from './src/screens/TalhoesScreen';
 
-import { login, register } from './src/services/auth';
-import { createProperty, listProperties, Property } from './src/services/properties';
+import { getAuthApiErrorMessage, login, register } from './src/services/auth';
+import { createProperty, deleteProperty, listProperties, Property, updateProperty } from './src/services/properties';
 import {
   createRainGauge,
+  deleteRainGauge,
   listRainGauges,
   RainGauge as RainGaugeType,
+  updateRainGauge,
 } from './src/services/rainGauges';
 import {
   createRainfallRecord,
@@ -41,12 +47,48 @@ import {
   RainSummaryPoint,
 } from './src/services/dashboard';
 import { clearSession, getToken, getUser, saveSession } from './src/services/storage';
-import { getCurrentWeather, WeatherCurrent } from './src/services/weather';
+import { getCurrentWeather, WeatherCurrent, WeatherLocationParams } from './src/services/weather';
 import { createUser, listUsers, updateUser, UserItem } from './src/services/users';
 import { WeatherForecastCard } from './src/components/WeatherForecastCard';
 import { RainRecordsScreen } from './src/screens/RainRecordsScreen';
 import type { MapRegion } from './src/types/mapsRegion';
 import { agronomy as A } from './src/theme/agronomy';
+import { PropertyEditScreen } from './src/screens/PropertyEditScreen';
+
+function deviceLocalYmd(offsetDays = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getDeviceTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'America/Sao_Paulo';
+  } catch {
+    return 'America/Sao_Paulo';
+  }
+}
+
+async function getWeatherLocationParams(): Promise<WeatherLocationParams | undefined> {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') return undefined;
+    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    const tz = getDeviceTimeZone();
+    return {
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+      timeZone: tz,
+      localToday: deviceLocalYmd(0),
+      localYesterday: deviceLocalYmd(-1),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 function formatDateTimePtBrInput(iso: string): string {
   const d = new Date(iso);
@@ -173,6 +215,131 @@ function extractPropertyPolygon(metadata: Record<string, unknown> | null): GeoPo
   return null;
 }
 
+function normalizePolygon(points: GeoPoint[]): GeoPoint[] | null {
+  if (points.length < 3) return null;
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (first.lat === last.lat && first.lng === last.lng) {
+    return points.length >= 4 ? points : null;
+  }
+  return [...points, first];
+}
+
+/** KML quase sempre usa `lng,lat` ou `lng,lat,alt`; separadores entre vértices: espaço ou quebra de linha. */
+function parseCoordinateTuplesFromRaw(raw: string): GeoPoint[] {
+  const clean = raw.replace(/\uFEFF/g, '').trim();
+  if (!clean) return [];
+  const points: GeoPoint[] = [];
+  const tuples = clean.split(/\s+/).filter(Boolean);
+  for (const tuple of tuples) {
+    const parts = tuple.split(',').map((p) => p.trim());
+    if (parts.length < 2) continue;
+    const lng = Number(parts[0]);
+    const lat = Number(parts[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    points.push({ lat, lng });
+  }
+  return points;
+}
+
+const COORD_OPEN = /<(?:[\w.-]+:)?coordinates\b[^>]*>/i;
+const COORD_CLOSE = /<\/(?:[\w.-]+:)?coordinates>/i;
+
+function firstCoordinatesInnerXml(fragment: string): string | null {
+  const open = fragment.match(COORD_OPEN);
+  if (!open || open.index === undefined) return null;
+  const start = open.index + open[0].length;
+  const rest = fragment.slice(start);
+  const close = rest.match(COORD_CLOSE);
+  if (!close || close.index === undefined) return null;
+  return rest.slice(0, close.index);
+}
+
+/** Prefer anel exterior da `<Polygon>` (evita `innerBoundaryIs`). */
+function coordinatesRawFromPolygonBlock(polygonBlock: string): string | null {
+  const outer = polygonBlock.match(
+    /<(?:[\w.-]+:)?outerBoundaryIs\b[\s\S]*?<\/(?:[\w.-]+:)?outerBoundaryIs>/i,
+  );
+  const searchIn = outer ? outer[0] : polygonBlock;
+  return firstCoordinatesInnerXml(searchIn);
+}
+
+/**
+ * Aceita `<Polygon>` com ou sem prefixo de namespace (`kml:Polygon`), `LineString` fechado ou aberto
+ * (muitos exports de GPS/GIS só geram linha), e por último qualquer bloco `<coordinates>` grande o bastante.
+ */
+function extractFirstPolygonFromKml(kmlText: string): GeoPoint[] | null {
+  const text = kmlText.replace(/^\uFEFF/, '').trim();
+  if (!text) return null;
+
+  const polygonTag = /<(?:[\w.-]+:)?Polygon\b[\s\S]*?<\/(?:[\w.-]+:)?Polygon>/gi;
+  polygonTag.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = polygonTag.exec(text)) !== null) {
+    const raw = coordinatesRawFromPolygonBlock(m[0]);
+    if (!raw) continue;
+    const normalized = normalizePolygon(parseCoordinateTuplesFromRaw(raw));
+    if (normalized) return normalized;
+  }
+
+  const lineTag = /<(?:[\w.-]+:)?LineString\b[\s\S]*?<\/(?:[\w.-]+:)?LineString>/gi;
+  lineTag.lastIndex = 0;
+  while ((m = lineTag.exec(text)) !== null) {
+    const raw = firstCoordinatesInnerXml(m[0]);
+    if (!raw) continue;
+    const normalized = normalizePolygon(parseCoordinateTuplesFromRaw(raw));
+    if (normalized) return normalized;
+  }
+
+  let best: GeoPoint[] | null = null;
+  let searchPos = 0;
+  while (searchPos < text.length) {
+    const slice = text.slice(searchPos);
+    const open = slice.match(COORD_OPEN);
+    if (!open || open.index === undefined) break;
+    const relStart = searchPos + open.index + open[0].length;
+    const afterOpen = text.slice(relStart);
+    const close = afterOpen.match(COORD_CLOSE);
+    if (!close || close.index === undefined) break;
+    const inner = afterOpen.slice(0, close.index);
+    searchPos = relStart + close.index + close[0].length;
+
+    const normalized = normalizePolygon(parseCoordinateTuplesFromRaw(inner));
+    if (normalized && (!best || normalized.length > best.length)) best = normalized;
+  }
+
+  return best;
+}
+
+function polygonToMetadata(polygon: GeoPoint[] | null): Record<string, unknown> | null {
+  if (!polygon || polygon.length < 4) return null;
+  return {
+    geoJson: {
+      type: 'Polygon',
+      coordinates: [polygon.map((p) => [p.lng, p.lat])],
+    },
+  };
+}
+
+function getPolygonCenter(polygon: GeoPoint[]): GeoPoint | null {
+  if (!polygon.length) return null;
+  const ring =
+    polygon.length >= 2 &&
+    polygon[0].lat === polygon[polygon.length - 1].lat &&
+    polygon[0].lng === polygon[polygon.length - 1].lng
+      ? polygon.slice(0, -1)
+      : polygon;
+  if (!ring.length) return null;
+
+  let latSum = 0;
+  let lngSum = 0;
+  for (const point of ring) {
+    latSum += point.lat;
+    lngSum += point.lng;
+  }
+  return { lat: latSum / ring.length, lng: lngSum / ring.length };
+}
+
 function isPointInsidePolygon(point: GeoPoint, polygon: GeoPoint[]): boolean {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -196,6 +363,7 @@ export default function App() {
     | 'register'
     | 'dashboard'
     | 'talhoes'
+    | 'editProperty'
     | 'rainMap'
     | 'rainGauges'
     | 'rainRecords'
@@ -226,6 +394,10 @@ export default function App() {
   } | null>(null);
   const [rainGauges, setRainGauges] = useState<RainGaugeType[]>([]);
   const [newGaugeName, setNewGaugeName] = useState('');
+  const [editingGaugeId, setEditingGaugeId] = useState<string | null>(null);
+  const [editGaugeName, setEditGaugeName] = useState('');
+  const [editGaugeLatText, setEditGaugeLatText] = useState('');
+  const [editGaugeLngText, setEditGaugeLngText] = useState('');
   const [selectedGauge, setSelectedGauge] = useState<RainGaugeType | null>(null);
   const [rainRecords, setRainRecords] = useState<RainfallRecordType[]>([]);
   const [rainRecordsLoaded, setRainRecordsLoaded] = useState(false);
@@ -235,9 +407,18 @@ export default function App() {
   const [rainDateInput, setRainDateInput] = useState(
     formatDateTimePtBrInput(new Date().toISOString()),
   );
-  const [mapPickerMode, setMapPickerMode] = useState<'property' | 'gauge' | 'talhao' | null>(null);
+  const [mapPickerMode, setMapPickerMode] = useState<'property' | 'propertyEdit' | 'gauge' | 'talhao' | null>(null);
   const [newPropertyLat, setNewPropertyLat] = useState<number | null>(null);
   const [newPropertyLng, setNewPropertyLng] = useState<number | null>(null);
+  const [newPropertyPolygon, setNewPropertyPolygon] = useState<GeoPoint[] | null>(null);
+
+  const [editingPropertyId, setEditingPropertyId] = useState<string | null>(null);
+  const [editPropertyName, setEditPropertyName] = useState('');
+  const [editPropertyLatText, setEditPropertyLatText] = useState('');
+  const [editPropertyLngText, setEditPropertyLngText] = useState('');
+  const [editPropertyLat, setEditPropertyLat] = useState<number | null>(null);
+  const [editPropertyLng, setEditPropertyLng] = useState<number | null>(null);
+  const [editPropertyPolygon, setEditPropertyPolygon] = useState<GeoPoint[] | null>(null);
   const [newTalhaoName, setNewTalhaoName] = useState('');
   const [selectedTalhaoPropertyId, setSelectedTalhaoPropertyId] = useState<string | null>(null);
   const [newTalhaoLat, setNewTalhaoLat] = useState<number | null>(null);
@@ -313,18 +494,9 @@ export default function App() {
       setOrganizationId(result.user.organizationId);
       setTela('dashboard');
     } catch (err: unknown) {
-      const msg =
-        err &&
-        typeof err === 'object' &&
-        'response' in err &&
-        err.response &&
-        typeof err.response === 'object' &&
-        'data' in err.response &&
-        err.response.data &&
-        typeof (err.response.data as { message?: string }).message === 'string'
-          ? (err.response.data as { message: string }).message
-          : 'Falha ao criar conta. Verifique a rede.';
-      setError(msg);
+      setError(
+        getAuthApiErrorMessage(err, 'Falha ao criar conta. Verifique a rede.')
+      );
     } finally {
       setLoading(false);
     }
@@ -353,18 +525,9 @@ export default function App() {
       setOrganizationId(result.user.organizationId);
       setTela('dashboard');
     } catch (err: unknown) {
-      const msg =
-        err &&
-        typeof err === 'object' &&
-        'response' in err &&
-        err.response &&
-        typeof err.response === 'object' &&
-        'data' in err.response &&
-        err.response.data &&
-        typeof (err.response.data as { message?: string }).message === 'string'
-          ? (err.response.data as { message: string }).message
-          : 'Falha ao entrar. Verifique a rede e os dados.';
-      setError(msg);
+      setError(
+        getAuthApiErrorMessage(err, 'Falha ao entrar. Verifique a rede e os dados.')
+      );
     } finally {
       setLoading(false);
     }
@@ -384,6 +547,10 @@ export default function App() {
     setSelectedProperty(null);
     setRainGauges([]);
     setNewGaugeName('');
+    setEditingGaugeId(null);
+    setEditGaugeName('');
+    setEditGaugeLatText('');
+    setEditGaugeLngText('');
     setSelectedGauge(null);
     setRainRecords([]);
     setRainAmount('');
@@ -393,6 +560,12 @@ export default function App() {
     setNewPropertyLng(null);
     setNewGaugeLat(null);
     setNewGaugeLng(null);
+    setEditingPropertyId(null);
+    setEditPropertyName('');
+    setEditPropertyLatText('');
+    setEditPropertyLngText('');
+    setEditPropertyLat(null);
+    setEditPropertyLng(null);
     setTela('login');
   };
 
@@ -402,6 +575,7 @@ export default function App() {
         !organizationId ||
         (tela !== 'dashboard' &&
           tela !== 'talhoes' &&
+          tela !== 'editProperty' &&
           tela !== 'registrarChuva' &&
           tela !== 'cadastrarPluviometro' &&
           tela !== 'cadastrarTalhao')
@@ -496,9 +670,10 @@ export default function App() {
       )
         return;
       try {
+        const loc = await getWeatherLocationParams();
         const [summary, w] = await Promise.all([
           getRainSummary(organizationId, rainSummaryDays),
-          getCurrentWeather(),
+          getCurrentWeather(loc),
         ]);
         setRainSummary(summary);
         setWeather(w);
@@ -600,11 +775,13 @@ export default function App() {
         name: nameTrimmed,
         latitude: newPropertyLat ?? undefined,
         longitude: newPropertyLng ?? undefined,
+        metadata: polygonToMetadata(newPropertyPolygon),
       });
       setProperties((prev) => [created, ...prev]);
       setNewPropertyName('');
       setNewPropertyLat(null);
       setNewPropertyLng(null);
+      setNewPropertyPolygon(null);
     } catch (err: unknown) {
       const msg =
         err &&
@@ -617,6 +794,212 @@ export default function App() {
         typeof (err.response.data as { message?: string }).message === 'string'
           ? (err.response.data as { message: string }).message
           : 'Falha ao criar talhão. Tente novamente.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const parseCoordTextToNumber = (text: string): number | null => {
+    const normalized = text.replace(',', '.').trim();
+    const n = Number(normalized);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const handleStartEditProperty = (p: Property) => {
+    setError('');
+    setEditingPropertyId(p.id);
+    setEditPropertyName(p.name ?? '');
+
+    const lat = p.latitude != null && Number.isFinite(Number(p.latitude)) ? Number(p.latitude) : null;
+    const lng = p.longitude != null && Number.isFinite(Number(p.longitude)) ? Number(p.longitude) : null;
+
+    setEditPropertyLat(lat);
+    setEditPropertyLng(lng);
+    setEditPropertyLatText(lat != null ? String(lat) : '');
+    setEditPropertyLngText(lng != null ? String(lng) : '');
+    setEditPropertyPolygon(extractPropertyPolygon(p.metadata));
+    setTela('editProperty');
+  };
+
+  const handleCancelEditProperty = () => {
+    setEditingPropertyId(null);
+    setEditPropertyName('');
+    setEditPropertyLatText('');
+    setEditPropertyLngText('');
+    setEditPropertyLat(null);
+    setEditPropertyLng(null);
+    setEditPropertyPolygon(null);
+    setError('');
+    setTela('talhoes');
+  };
+
+  type KmlPickResult =
+    | { status: 'ok'; polygon: GeoPoint[] }
+    | { status: 'canceled' }
+    | { status: 'no_polygon' }
+    | { status: 'read_error' };
+
+  const pickPolygonFromKml = async (): Promise<KmlPickResult> => {
+    const selection = await DocumentPicker.getDocumentAsync({
+      type: [
+        'application/vnd.google-earth.kml+xml',
+        'application/xml',
+        'text/xml',
+        'text/plain',
+        'application/octet-stream',
+      ],
+      multiple: false,
+      copyToCacheDirectory: true,
+    });
+    if (selection.canceled || selection.assets.length === 0) {
+      return { status: 'canceled' };
+    }
+    const asset = selection.assets[0];
+    let kmlText: string;
+    try {
+      // expo-file-system v19: readAsStringAsync no entry principal só lança; usar legacy (DocumentPicker URI).
+      kmlText = await FileSystemLegacy.readAsStringAsync(asset.uri, { encoding: 'utf8' });
+    } catch {
+      return { status: 'read_error' };
+    }
+    const polygon = extractFirstPolygonFromKml(kmlText);
+    if (!polygon) return { status: 'no_polygon' };
+    return { status: 'ok', polygon };
+  };
+
+  const kmlImportErrorMessage =
+    'Não foi possível ler o limite no KML. Use um arquivo com polígono ou linha fechada (Polygon / LineString) e coordenadas em <coordinates> (longitude,latitude).';
+
+  const handleImportKmlForNewProperty = async () => {
+    setError('');
+    try {
+      const result = await pickPolygonFromKml();
+      if (result.status === 'canceled') return;
+      if (result.status === 'read_error') {
+        setError('Não foi possível abrir o arquivo. Tente copiá-lo para outra pasta ou exportar o KML novamente.');
+        return;
+      }
+      if (result.status === 'no_polygon') {
+        setError(kmlImportErrorMessage);
+        return;
+      }
+      setNewPropertyPolygon(result.polygon);
+    } catch {
+      setError(kmlImportErrorMessage);
+    }
+  };
+
+  const handleImportKmlForEditProperty = async () => {
+    setError('');
+    try {
+      const result = await pickPolygonFromKml();
+      if (result.status === 'canceled') return;
+      if (result.status === 'read_error') {
+        setError('Não foi possível abrir o arquivo. Tente copiá-lo para outra pasta ou exportar o KML novamente.');
+        return;
+      }
+      if (result.status === 'no_polygon') {
+        setError(kmlImportErrorMessage);
+        return;
+      }
+      setEditPropertyPolygon(result.polygon);
+    } catch {
+      setError(kmlImportErrorMessage);
+    }
+  };
+
+  const handleChangeEditPropertyLatText = (t: string) => {
+    setEditPropertyLatText(t);
+    setEditPropertyLat(parseCoordTextToNumber(t));
+    setError('');
+  };
+
+  const handleChangeEditPropertyLngText = (t: string) => {
+    setEditPropertyLngText(t);
+    setEditPropertyLng(parseCoordTextToNumber(t));
+    setError('');
+  };
+
+  const handleChangeEditPropertyName = (t: string) => {
+    setEditPropertyName(t);
+    setError('');
+  };
+
+  const handleSaveEditProperty = async () => {
+    if (!organizationId) return;
+    if (!editingPropertyId) return;
+
+    const nameTrimmed = editPropertyName.trim();
+    if (!nameTrimmed) {
+      setError('Informe o nome da propriedade.');
+      return;
+    }
+    if (!Number.isFinite(editPropertyLat as number) || !Number.isFinite(editPropertyLng as number)) {
+      setError('Informe a latitude e a longitude da propriedade (números válidos).');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const updated = await updateProperty(organizationId, editingPropertyId, {
+        name: nameTrimmed,
+        latitude: editPropertyLat as number,
+        longitude: editPropertyLng as number,
+        metadata: polygonToMetadata(editPropertyPolygon),
+      });
+
+      setProperties((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      setEditingPropertyId(null);
+      setEditPropertyName('');
+      setEditPropertyLatText('');
+      setEditPropertyLngText('');
+      setEditPropertyLat(null);
+      setEditPropertyLng(null);
+      setEditPropertyPolygon(null);
+      setTela('talhoes');
+    } catch (err: unknown) {
+      const msg =
+        err &&
+        typeof err === 'object' &&
+        'response' in err &&
+        (err as any).response &&
+        typeof (err as any).response === 'object' &&
+        'data' in (err as any).response &&
+        (err as any).response.data &&
+        typeof (err as any).response.data.message === 'string'
+          ? (err as any).response.data.message
+          : 'Falha ao salvar alterações da propriedade. Tente novamente.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteProperty = async (id: string) => {
+    if (!organizationId) return;
+
+    setLoading(true);
+    setError('');
+    try {
+      await deleteProperty(organizationId, id);
+      setProperties((prev) => prev.filter((p) => p.id !== id));
+
+      if (editingPropertyId === id) handleCancelEditProperty();
+      if (selectedProperty?.id === id) setSelectedProperty(null);
+    } catch (err: unknown) {
+      const msg =
+        err &&
+        typeof err === 'object' &&
+        'response' in err &&
+        (err as any).response &&
+        typeof (err as any).response === 'object' &&
+        'data' in (err as any).response &&
+        (err as any).response.data &&
+        typeof (err as any).response.data.message === 'string'
+          ? (err as any).response.data.message
+          : 'Falha ao excluir propriedade. Tente novamente.';
       setError(msg);
     } finally {
       setLoading(false);
@@ -744,6 +1127,129 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleStartEditGauge = (gauge: RainGaugeType) => {
+    setError('');
+    setEditingGaugeId(gauge.id);
+    setEditGaugeName(gauge.name ?? '');
+    setEditGaugeLatText(gauge.latitude != null ? String(gauge.latitude) : '');
+    setEditGaugeLngText(gauge.longitude != null ? String(gauge.longitude) : '');
+  };
+
+  const handleCancelEditGauge = () => {
+    setEditingGaugeId(null);
+    setEditGaugeName('');
+    setEditGaugeLatText('');
+    setEditGaugeLngText('');
+    setError('');
+  };
+
+  const handleChangeEditGaugeName = (value: string) => {
+    setEditGaugeName(value);
+    setError('');
+  };
+
+  const handleChangeEditGaugeLatText = (value: string) => {
+    setEditGaugeLatText(value);
+    setError('');
+  };
+
+  const handleChangeEditGaugeLngText = (value: string) => {
+    setEditGaugeLngText(value);
+    setError('');
+  };
+
+  const handleSaveEditGauge = async () => {
+    if (!organizationId || !selectedProperty || !editingGaugeId) return;
+
+    const nameTrimmed = editGaugeName.trim();
+    if (!nameTrimmed) {
+      setError('Informe o nome do pluviômetro.');
+      return;
+    }
+
+    const lat = parseCoordTextToNumber(editGaugeLatText);
+    const lng = parseCoordTextToNumber(editGaugeLngText);
+    if (editGaugeLatText.trim() && lat == null) {
+      setError('Latitude inválida. Informe um número válido.');
+      return;
+    }
+    if (editGaugeLngText.trim() && lng == null) {
+      setError('Longitude inválida. Informe um número válido.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const updated = await updateRainGauge(organizationId, selectedProperty.id, editingGaugeId, {
+        name: nameTrimmed,
+        latitude: lat,
+        longitude: lng,
+      });
+      setRainGauges((prev) => prev.map((g) => (g.id === updated.id ? updated : g)));
+      setSelectedGauge((prev) => (prev?.id === updated.id ? updated : prev));
+      handleCancelEditGauge();
+    } catch (err: unknown) {
+      const msg =
+        err &&
+        typeof err === 'object' &&
+        'response' in err &&
+        (err as any).response &&
+        typeof (err as any).response === 'object' &&
+        'data' in (err as any).response &&
+        (err as any).response.data &&
+        typeof (err as any).response.data.message === 'string'
+          ? (err as any).response.data.message
+          : 'Falha ao atualizar pluviômetro. Tente novamente.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteGauge = (gauge: RainGaugeType) => {
+    if (!organizationId || !selectedProperty) return;
+    Alert.alert(
+      'Excluir pluviômetro',
+      `Deseja excluir "${gauge.name}"?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            setLoading(true);
+            setError('');
+            try {
+              await deleteRainGauge(organizationId, selectedProperty.id, gauge.id);
+              setRainGauges((prev) => prev.filter((item) => item.id !== gauge.id));
+              setSelectedGauge((prev) => (prev?.id === gauge.id ? null : prev));
+              if (editingGaugeId === gauge.id) {
+                handleCancelEditGauge();
+              }
+            } catch (err: unknown) {
+              const msg =
+                err &&
+                typeof err === 'object' &&
+                'response' in err &&
+                (err as any).response &&
+                typeof (err as any).response === 'object' &&
+                'data' in (err as any).response &&
+                (err as any).response.data &&
+                typeof (err as any).response.data.message === 'string'
+                  ? (err as any).response.data.message
+                  : 'Falha ao excluir pluviômetro. Tente novamente.';
+              setError(msg);
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
   };
 
   const handleCreateRainRecord = async () => {
@@ -952,6 +1458,24 @@ export default function App() {
     );
   }
 
+  if (mapPickerMode === 'propertyEdit') {
+    return (
+      <MapLocationPicker
+        title="Localização da propriedade"
+        initialLatitude={editPropertyLat}
+        initialLongitude={editPropertyLng}
+        onSelect={(lat, lng) => {
+          setEditPropertyLat(lat);
+          setEditPropertyLng(lng);
+          setEditPropertyLatText(String(lat));
+          setEditPropertyLngText(String(lng));
+          setMapPickerMode(null);
+        }}
+        onCancel={() => setMapPickerMode(null)}
+      />
+    );
+  }
+
   if (mapPickerMode === 'gauge') {
     const propertyForCenter = selectedProperty
       ? properties.find((p) => p.id === selectedProperty.id)
@@ -1032,8 +1556,40 @@ export default function App() {
           <MapView
             style={{ flex: 1 }}
             region={mapRegion}
+            provider={MapView.PROVIDER_OSM}
             onRegionChangeComplete={(r) => setMapRegion(r)}
           >
+            {properties.map((p) => {
+              const polygon = extractPropertyPolygon(p.metadata);
+              if (!polygon || polygon.length < 3) return null;
+              const center = getPolygonCenter(polygon);
+              return (
+                <React.Fragment key={`poly-group-${p.id}`}>
+                <Polygon
+                  key={`poly-${p.id}`}
+                  coordinates={polygon.map((point) => ({
+                    latitude: point.lat,
+                    longitude: point.lng,
+                  }))}
+                  strokeColor="rgba(41, 84, 57, 0.85)"
+                  fillColor="rgba(41, 84, 57, 0.18)"
+                  strokeWidth={2}
+                />
+                {center ? (
+                  <Marker
+                    key={`poly-label-${p.id}`}
+                    coordinate={{ latitude: center.lat, longitude: center.lng }}
+                    tracksViewChanges={false}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                  >
+                    <View style={styles.polygonLabel}>
+                      <Text style={styles.polygonLabelText}>{p.name}</Text>
+                    </View>
+                  </Marker>
+                ) : null}
+                </React.Fragment>
+              );
+            })}
             {properties
               .filter(
                 (p) =>
@@ -2532,6 +3088,7 @@ export default function App() {
           setSelectedProperty(null);
           setRainGauges([]);
           setNewGaugeName('');
+          handleCancelEditGauge();
           setError('');
         }}
         onChangeGaugeName={(t) => {
@@ -2540,6 +3097,17 @@ export default function App() {
         }}
         onOpenGaugeMap={() => setMapPickerMode('gauge')}
         onCreateRainGauge={handleCreateRainGauge}
+        editingGaugeId={editingGaugeId}
+        editGaugeName={editGaugeName}
+        editGaugeLatText={editGaugeLatText}
+        editGaugeLngText={editGaugeLngText}
+        onStartEditGauge={handleStartEditGauge}
+        onCancelEditGauge={handleCancelEditGauge}
+        onSaveEditGauge={handleSaveEditGauge}
+        onDeleteGauge={handleDeleteGauge}
+        onChangeEditGaugeName={handleChangeEditGaugeName}
+        onChangeEditGaugeLatText={handleChangeEditGaugeLatText}
+        onChangeEditGaugeLngText={handleChangeEditGaugeLngText}
         onSelectGauge={(g) => {
           setSelectedGauge(g);
           setRainRecordsLoaded(false);
@@ -2550,10 +3118,54 @@ export default function App() {
     );
   }
 
+  if (tela === 'editProperty') {
+    const editLatValid = editPropertyLat != null && Number.isFinite(editPropertyLat);
+    const editLngValid = editPropertyLng != null && Number.isFinite(editPropertyLng);
+    const editSaveDisabled = !editPropertyName.trim() || !editLatValid || !editLngValid;
+    const editPropertyLocationLabel =
+      editLatValid && editLngValid
+        ? `Localização: ${editPropertyLat.toFixed(4)}, ${editPropertyLng.toFixed(4)} (alterar)`
+        : 'Definir localização no mapa';
+    const editPropertyAreaLabel =
+      editPropertyPolygon && editPropertyPolygon.length >= 4
+        ? `Área importada via KML (${editPropertyPolygon.length - 1} pontos).`
+        : 'Área não definida. Importe um KML para delimitar a propriedade.';
+
+    if (!editingPropertyId) {
+      setTela('talhoes');
+      return null;
+    }
+
+    return (
+      <PropertyEditScreen
+        loading={loading}
+        error={error}
+        propertyName={editPropertyName}
+        latText={editPropertyLatText}
+        lngText={editPropertyLngText}
+        locationLabel={editPropertyLocationLabel}
+        areaLabel={editPropertyAreaLabel}
+        saveDisabled={editSaveDisabled}
+        onBack={handleCancelEditProperty}
+        onCancel={handleCancelEditProperty}
+        onSave={handleSaveEditProperty}
+        onOpenMap={() => setMapPickerMode('propertyEdit')}
+        onImportKml={handleImportKmlForEditProperty}
+        onChangeName={handleChangeEditPropertyName}
+        onChangeLatText={handleChangeEditPropertyLatText}
+        onChangeLngText={handleChangeEditPropertyLngText}
+      />
+    );
+  }
+
   if (tela === 'talhoes') {
+    const propertyAreaLabel =
+      newPropertyPolygon && newPropertyPolygon.length >= 4
+        ? `Área importada via KML (${newPropertyPolygon.length - 1} pontos).`
+        : 'Área não definida. Importe um KML para delimitar a propriedade.';
+
     return (
       <TalhoesScreen
-        user={user}
         loading={loading}
         error={error}
         newPropertyName={newPropertyName}
@@ -2563,18 +3175,22 @@ export default function App() {
             ? `Localização: ${Number(newPropertyLat).toFixed(4)}, ${Number(newPropertyLng).toFixed(4)} (alterar)`
             : 'Definir localização no mapa'
         }
+        propertyAreaLabel={propertyAreaLabel}
         onBack={() => setTela('dashboard')}
         onChangePropertyName={(t) => {
           setNewPropertyName(t);
           setError('');
         }}
         onOpenPropertyMap={() => setMapPickerMode('property')}
+        onImportPropertyKml={handleImportKmlForNewProperty}
         onCreateProperty={handleCreateProperty}
         onSelectProperty={(id, nameProp) => {
           setSelectedProperty({ id, name: nameProp });
           setTela('rainGauges');
           setError('');
         }}
+        onStartEditProperty={handleStartEditProperty}
+        onDeleteProperty={handleDeleteProperty}
         onGoRainMap={() => setTela('rainMap')}
       />
     );
@@ -2760,5 +3376,18 @@ const styles = StyleSheet.create({
     color: A.textMuted,
     fontSize: 14,
     marginTop: 4,
+  },
+  polygonLabel: {
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    borderColor: 'rgba(148, 163, 184, 0.7)',
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  polygonLabelText: {
+    color: '#e5e7eb',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

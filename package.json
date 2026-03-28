@@ -17,5 +17,11 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5"
+  },
+  "dependencies": {
+    "expo-linear-gradient": "^55.0.9",
+    "react-native-gifted-charts": "^1.4.76",
+    "react-native-safe-area-context": "^5.7.0",
+    "react-native-svg": "^15.15.4"
   }
 }

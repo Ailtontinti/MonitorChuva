@@ -17,10 +17,29 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#f4f1ea"
-      }
+      },
+      "package": "com.ailtontinti.agropluvi",
+      "softwareKeyboardLayoutMode": "resize"
     },
     "ios": {
-      "supportsTablet": true
-    }
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ailtontinti.agropluvi",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4f2467ad-b365-449a-a0f7-58fe5839ebf2"
+      }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "O app usa sua localização para mostrar a chuva na sua região."
+        }
+      ]
+    ]
   }
 }

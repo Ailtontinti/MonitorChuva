@@ -21,6 +21,13 @@ export interface CreatePropertyInput {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface UpdatePropertyInput {
+  name: string;
+  latitude: number;
+  longitude: number;
+  metadata?: Record<string, unknown> | null;
+}
+
 export async function listProperties(organizationId: string): Promise<Property[]> {
   const token = await getToken();
   const { data } = await axios.get<Property[]>(`${API_BASE_URL}/api/properties`, {
@@ -58,5 +65,44 @@ export async function createProperty(
   );
 
   return data;
+}
+
+export async function updateProperty(
+  organizationId: string,
+  id: string,
+  input: UpdatePropertyInput,
+): Promise<Property> {
+  const token = await getToken();
+
+  const { data } = await axios.put<Property>(
+    `${API_BASE_URL}/api/properties/${id}`,
+    {
+      name: input.name,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      metadata: input.metadata ?? null,
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Organization-Id': organizationId,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    },
+  );
+
+  return data;
+}
+
+export async function deleteProperty(organizationId: string, id: string): Promise<void> {
+  const token = await getToken();
+
+  await axios.delete(`${API_BASE_URL}/api/properties/${id}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Organization-Id': organizationId,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
 }
 

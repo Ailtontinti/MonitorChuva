@@ -16,6 +16,17 @@ interface Props {
   onOpenGaugeMap: () => void;
   onCreateRainGauge: () => void;
   onSelectGauge: (gauge: RainGauge) => void;
+  editingGaugeId: string | null;
+  editGaugeName: string;
+  editGaugeLatText: string;
+  editGaugeLngText: string;
+  onStartEditGauge: (gauge: RainGauge) => void;
+  onCancelEditGauge: () => void;
+  onSaveEditGauge: () => void;
+  onDeleteGauge: (gauge: RainGauge) => void;
+  onChangeEditGaugeName: (value: string) => void;
+  onChangeEditGaugeLatText: (value: string) => void;
+  onChangeEditGaugeLngText: (value: string) => void;
 }
 
 export function RainGaugesScreen({
@@ -30,6 +41,17 @@ export function RainGaugesScreen({
   onOpenGaugeMap,
   onCreateRainGauge,
   onSelectGauge,
+  editingGaugeId,
+  editGaugeName,
+  editGaugeLatText,
+  editGaugeLngText,
+  onStartEditGauge,
+  onCancelEditGauge,
+  onSaveEditGauge,
+  onDeleteGauge,
+  onChangeEditGaugeName,
+  onChangeEditGaugeLatText,
+  onChangeEditGaugeLngText,
 }: Props) {
   return (
     <View style={styles.tela}>
@@ -86,9 +108,80 @@ export function RainGaugesScreen({
                     <Text style={styles.propertyDescription}>Série: {g.serialNumber}</Text>
                   ) : null}
                   <Text style={styles.propertyCoords}>Status: {g.status}</Text>
+                  {g.latitude != null && g.longitude != null ? (
+                    <Text style={styles.propertyCoords}>
+                      Localização: {Number(g.latitude).toFixed(4)}, {Number(g.longitude).toFixed(4)}
+                    </Text>
+                  ) : null}
                   <Text style={[styles.propertyCoords, { marginTop: 6 }]}>
                     Toque para registrar chuva →
                   </Text>
+
+                  <View style={styles.cardActions}>
+                    <Pressable
+                      style={styles.actionBtn}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        onStartEditGauge(g);
+                      }}
+                    >
+                      <Text style={styles.actionBtnText}>Editar</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.actionBtn, styles.actionBtnDanger]}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        onDeleteGauge(g);
+                      }}
+                    >
+                      <Text style={[styles.actionBtnText, styles.actionBtnDangerText]}>Excluir</Text>
+                    </Pressable>
+                  </View>
+
+                  {editingGaugeId === g.id ? (
+                    <View style={styles.editBox}>
+                      <TextInput
+                        style={styles.input}
+                        placeholder="Nome do pluviômetro"
+                        placeholderTextColor={A.textMuted}
+                        value={editGaugeName}
+                        onChangeText={onChangeEditGaugeName}
+                        editable={!loading}
+                      />
+                      <TextInput
+                        style={styles.input}
+                        placeholder="Latitude"
+                        placeholderTextColor={A.textMuted}
+                        value={editGaugeLatText}
+                        onChangeText={onChangeEditGaugeLatText}
+                        editable={!loading}
+                        keyboardType="numbers-and-punctuation"
+                      />
+                      <TextInput
+                        style={styles.input}
+                        placeholder="Longitude"
+                        placeholderTextColor={A.textMuted}
+                        value={editGaugeLngText}
+                        onChangeText={onChangeEditGaugeLngText}
+                        editable={!loading}
+                        keyboardType="numbers-and-punctuation"
+                      />
+                      <View style={styles.cardActions}>
+                        <Pressable style={styles.actionBtn} onPress={onCancelEditGauge}>
+                          <Text style={styles.actionBtnText}>Cancelar</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.actionBtn, styles.actionBtnPrimary]}
+                          onPress={onSaveEditGauge}
+                          disabled={loading}
+                        >
+                          <Text style={[styles.actionBtnText, styles.actionBtnPrimaryText]}>
+                            {loading ? 'Salvando...' : 'Salvar'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
                 </Pressable>
               ))}
             </View>
@@ -160,5 +253,26 @@ const styles = StyleSheet.create({
   propertyName: { color: A.textPrimary, fontSize: 18, fontWeight: '700' },
   propertyDescription: { color: A.textSecondary, fontSize: 16, marginTop: 4 },
   propertyCoords: { color: A.textMuted, fontSize: 14, marginTop: 4 },
+  cardActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  actionBtn: {
+    borderWidth: 1,
+    borderColor: A.border,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: A.bgCanvas,
+  },
+  actionBtnText: { color: A.textPrimary, fontSize: 14, fontWeight: '600' },
+  actionBtnDanger: {
+    borderColor: A.error,
+    backgroundColor: '#fdf0ed',
+  },
+  actionBtnDangerText: { color: A.error },
+  actionBtnPrimary: {
+    borderColor: A.primary,
+    backgroundColor: A.primary,
+  },
+  actionBtnPrimaryText: { color: A.textOnDark },
+  editBox: { marginTop: 12 },
 });
 
